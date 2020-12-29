@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/gorilla/securecookie"
@@ -22,24 +23,15 @@ import (
 var SessionExpired error = errors.New("session expired")
 
 type Store struct {
-	db         DB
-	stmtInsert Stmt
-	stmtDelete Stmt
-	stmtUpdate Stmt
-	stmtSelect Stmt
+	db     DB
+	create *sql.Stmt
+	delete *sql.Stmt
+	update *sql.Stmt
+	get    *sql.Stmt
+	mu     sync.RWMutex
 
 	Codecs  []securecookie.Codec
 	Options *sessions.Options
-}
-
-// Stmt is a subset of *sql.Stmt used to create the session.  It allows
-// you to pass a modified database via the DB interface for more control around
-// databse connections. For example, you can use this to create concurrent sessions
-// by locking database access.
-type Stmt interface {
-	Exec(args ...interface{}) (sql.Result, error)
-	QueryRow(args ...interface{}) *sql.Row
-	Close() error
 }
 
 type sessionRow struct {
@@ -52,7 +44,7 @@ type sessionRow struct {
 
 type DB interface {
 	Exec(query string, args ...interface{}) (sql.Result, error)
-	Prepare(query string) (Stmt, error)
+	Prepare(query string) (*sql.Stmt, error)
 	Close() error
 }
 
@@ -61,7 +53,6 @@ func init() {
 }
 
 func NewStore(db DB, keyPairs ...[]byte) (*Store, error) {
-
 	cTableQ := "CREATE TABLE IF NOT EXISTS sessions " +
 		"(id INTEGER PRIMARY KEY, " +
 		"session_data LONGBLOB, " +
@@ -73,37 +64,37 @@ func NewStore(db DB, keyPairs ...[]byte) (*Store, error) {
 	}
 
 	insQ := "INSERT INTO sessions (id, session_data, created_on, modified_on, expires_on) VALUES (NULL, ?, ?, ?, ?)"
-	stmtInsert, stmtErr := db.Prepare(insQ)
-	if stmtErr != nil {
-		return nil, stmtErr
+	create, err := db.Prepare(insQ)
+	if err != nil {
+		return nil, err
 	}
 
 	delQ := "DELETE FROM sessions WHERE id = ?"
-	stmtDelete, stmtErr := db.Prepare(delQ)
-	if stmtErr != nil {
-		return nil, stmtErr
+	del, err := db.Prepare(delQ)
+	if err != nil {
+		return nil, err
 	}
 
 	updQ := "UPDATE sessions SET session_data = ?, created_on = ?, expires_on = ? " +
 		"WHERE id = ?"
-	stmtUpdate, stmtErr := db.Prepare(updQ)
-	if stmtErr != nil {
-		return nil, stmtErr
+	update, err := db.Prepare(updQ)
+	if err != nil {
+		return nil, err
 	}
 
 	selQ := "SELECT id, session_data, created_on, modified_on, expires_on from sessions WHERE id = ?"
-	stmtSelect, stmtErr := db.Prepare(selQ)
+	get, stmtErr := db.Prepare(selQ)
 	if stmtErr != nil {
 		return nil, stmtErr
 	}
 
 	return &Store{
-		db:         db,
-		stmtInsert: stmtInsert,
-		stmtDelete: stmtDelete,
-		stmtUpdate: stmtUpdate,
-		stmtSelect: stmtSelect,
-		Codecs:     securecookie.CodecsFromPairs(keyPairs...),
+		db:     db,
+		create: create,
+		delete: del,
+		update: update,
+		get:    get,
+		Codecs: securecookie.CodecsFromPairs(keyPairs...),
 		Options: &sessions.Options{
 			Path:   "/",
 			MaxAge: 60 * 60 * 24 * 14,
@@ -112,10 +103,10 @@ func NewStore(db DB, keyPairs ...[]byte) (*Store, error) {
 }
 
 func (m *Store) Close() {
-	m.stmtSelect.Close()
-	m.stmtUpdate.Close()
-	m.stmtDelete.Close()
-	m.stmtInsert.Close()
+	m.get.Close()
+	m.update.Close()
+	m.delete.Close()
+	m.create.Close()
 	m.db.Close()
 }
 
@@ -163,6 +154,9 @@ func (m *Store) Save(r *http.Request, w http.ResponseWriter, session *sessions.S
 }
 
 func (m *Store) insert(session *sessions.Session) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	var createdOn time.Time
 	var modifiedOn time.Time
 	var expiresOn time.Time
@@ -187,7 +181,7 @@ func (m *Store) insert(session *sessions.Session) error {
 	if encErr != nil {
 		return encErr
 	}
-	res, insErr := m.stmtInsert.Exec(encoded, createdOn, modifiedOn, expiresOn)
+	res, insErr := m.create.Exec(encoded, createdOn, modifiedOn, expiresOn)
 	if insErr != nil {
 		return insErr
 	}
@@ -200,6 +194,8 @@ func (m *Store) insert(session *sessions.Session) error {
 }
 
 func (m *Store) Delete(r *http.Request, w http.ResponseWriter, session *sessions.Session) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 
 	// Set cookie to expire.
 	options := *session.Options
@@ -210,7 +206,7 @@ func (m *Store) Delete(r *http.Request, w http.ResponseWriter, session *sessions
 		delete(session.Values, k)
 	}
 
-	_, delErr := m.stmtDelete.Exec(session.ID)
+	_, delErr := m.delete.Exec(session.ID)
 	if delErr != nil {
 		return delErr
 	}
@@ -218,6 +214,9 @@ func (m *Store) Delete(r *http.Request, w http.ResponseWriter, session *sessions
 }
 
 func (m *Store) save(session *sessions.Session) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	if session.IsNew {
 		return m.insert(session)
 	}
@@ -247,7 +246,7 @@ func (m *Store) save(session *sessions.Session) error {
 	if encErr != nil {
 		return encErr
 	}
-	_, updErr := m.stmtUpdate.Exec(encoded, createdOn, expiresOn, session.ID)
+	_, updErr := m.update.Exec(encoded, createdOn, expiresOn, session.ID)
 	if updErr != nil {
 		return updErr
 	}
@@ -255,7 +254,10 @@ func (m *Store) save(session *sessions.Session) error {
 }
 
 func (m *Store) load(session *sessions.Session) error {
-	row := m.stmtSelect.QueryRow(session.ID)
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	row := m.get.QueryRow(session.ID)
 	sess := sessionRow{}
 	scanErr := row.Scan(&sess.id, &sess.data, &sess.createdOn, &sess.modifiedOn, &sess.expiresOn)
 	if scanErr != nil {
