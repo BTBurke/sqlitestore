@@ -52,7 +52,7 @@ type sessionRow struct {
 
 type DB interface {
 	Exec(query string, args ...interface{}) (sql.Result, error)
-	Prepare(query string) (*sql.Stmt, error)
+	Prepare(query string) (Stmt, error)
 	Close() error
 }
 
@@ -60,16 +60,7 @@ func init() {
 	gob.Register(time.Time{})
 }
 
-func NewSqliteStore(endpoint string, tableName string, path string, maxAge int, keyPairs ...[]byte) (*SqliteStore, error) {
-	db, err := sql.Open("sqlite3", endpoint)
-	if err != nil {
-		return nil, err
-	}
-
-	return NewSqliteStoreFromConnection(db, tableName, path, maxAge, keyPairs...)
-}
-
-func NewSqliteStoreFromConnection(db DB, tableName string, path string, maxAge int, keyPairs ...[]byte) (*SqliteStore, error) {
+func NewStore(db DB, tableName string, path string, maxAge int, keyPairs ...[]byte) (*SqliteStore, error) {
 	// Make sure table name is enclosed.
 	tableName = "`" + strings.Trim(tableName, "`") + "`"
 
