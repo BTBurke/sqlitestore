@@ -137,6 +137,12 @@ func (m *Store) New(r *http.Request, name string) (*sessions.Session, error) {
 }
 
 func (m *Store) Save(r *http.Request, w http.ResponseWriter, session *sessions.Session) error {
+	// in accordance with the sessions spec, a MaxAge <=0 triggers deleting the cookie from storage
+	// and should also cause the browser to delete the cookie
+	if session.Options.MaxAge <= 0 {
+		return m.Delete(r, w, session)
+	}
+
 	var err error
 	if session.ID == "" {
 		if err = m.insert(session); err != nil {

@@ -34,7 +34,6 @@ func TestSession(t *testing.T) {
 	assert.True(t, sess.IsNew)
 	w := httptest.NewRecorder()
 	assert.NoError(t, sess.Save(r, w))
-	t.Logf(w.Header().Get("Set-Cookie"))
 }
 
 func TestSessionRenewal(t *testing.T) {
@@ -111,15 +110,24 @@ func TestSessionDelete(t *testing.T) {
 	assert.NoError(t, err)
 	assert.True(t, sess.IsNew)
 
-	sess.Options = &sessions.Options{MaxAge: -1}
 	w := httptest.NewRecorder()
 	assert.NoError(t, sess.Save(r, w))
 
 	r2 := httptest.NewRequest("GET", "/", nil)
-	r2.Header.Add("Cookie", w.Header().Get("Set-Cookie"))
+	goodCookie := w.Header().Get("Set-Cookie")
+	r2.Header.Add("Cookie", goodCookie)
 
-	// session should immediately expire
+	// session should be ok on second request, then set to expire
 	sess2, err := store.New(r2, "test")
 	assert.NoError(t, err)
-	assert.True(t, sess2.IsNew)
+	assert.False(t, sess2.IsNew)
+	sess2.Options = &sessions.Options{MaxAge: -1}
+	assert.NoError(t, sess2.Save(r2, w))
+
+	// on third request, should be deleted and be a new session
+	r3 := httptest.NewRequest("GET", "/", nil)
+	r3.Header.Add("Cookie", goodCookie)
+	sess3, err := store.New(r3, "test")
+	assert.NoError(t, err)
+	assert.True(t, sess3.IsNew)
 }
