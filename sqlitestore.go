@@ -1,4 +1,4 @@
-/* Gorilla Sessions backend for MySQL.
+/* Gorilla Sessions backend for Sqlite3.
 
 Copyright (c) 2013 Contributors. See the list of contributors in the CONTRIBUTORS file for details.
 
@@ -11,7 +11,6 @@ import (
 	"encoding/gob"
 	"errors"
 	"fmt"
-	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -23,14 +22,24 @@ import (
 
 type SqliteStore struct {
 	db         DB
-	stmtInsert *sql.Stmt
-	stmtDelete *sql.Stmt
-	stmtUpdate *sql.Stmt
-	stmtSelect *sql.Stmt
+	stmtInsert Stmt
+	stmtDelete Stmt
+	stmtUpdate Stmt
+	stmtSelect Stmt
 
 	Codecs  []securecookie.Codec
 	Options *sessions.Options
 	table   string
+}
+
+// Stmt is a subset of *sql.Stmt used to create the session.  It allows
+// you to pass a modified database via the DB interface for more control around
+// databse connections. For example, you can use this to create concurrent sessions
+// by locking database access.
+type Stmt interface {
+	Exec(args ...interface{}) (sql.Result, error)
+	QueryRow(args ...interface{}) *sql.Row
+	Close() error
 }
 
 type sessionRow struct {
@@ -42,7 +51,7 @@ type sessionRow struct {
 }
 
 type DB interface {
-	Exec(query string, args ...interface{}) (sql.Result, error) 
+	Exec(query string, args ...interface{}) (sql.Result, error)
 	Prepare(query string) (*sql.Stmt, error)
 	Close() error
 }
@@ -223,7 +232,7 @@ func (m *SqliteStore) Delete(r *http.Request, w http.ResponseWriter, session *se
 }
 
 func (m *SqliteStore) save(session *sessions.Session) error {
-	if session.IsNew == true {
+	if session.IsNew {
 		return m.insert(session)
 	}
 	var createdOn time.Time
@@ -238,7 +247,6 @@ func (m *SqliteStore) save(session *sessions.Session) error {
 	exOn := session.Values["expires_on"]
 	if exOn == nil {
 		expiresOn = time.Now().Add(time.Second * time.Duration(session.Options.MaxAge))
-		log.Print("nil")
 	} else {
 		expiresOn = exOn.(time.Time)
 		if expiresOn.Sub(time.Now().Add(time.Second*time.Duration(session.Options.MaxAge))) < 0 {
@@ -267,8 +275,7 @@ func (m *SqliteStore) load(session *sessions.Session) error {
 	if scanErr != nil {
 		return scanErr
 	}
-	if sess.expiresOn.Sub(time.Now()) < 0 {
-		log.Printf("Session expired on %s, but it is %s now.", sess.expiresOn, time.Now())
+	if time.Until(sess.expiresOn) < 0 {
 		return errors.New("Session expired")
 	}
 	err := securecookie.DecodeMulti(session.Name(), sess.data, &session.Values, m.Codecs...)
