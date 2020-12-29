@@ -12,7 +12,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/gorilla/securecookie"
@@ -20,7 +19,9 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
-type SqliteStore struct {
+var SessionExpired error = errors.New("session expired")
+
+type Store struct {
 	db         DB
 	stmtInsert Stmt
 	stmtDelete Stmt
@@ -29,7 +30,6 @@ type SqliteStore struct {
 
 	Codecs  []securecookie.Codec
 	Options *sessions.Options
-	table   string
 }
 
 // Stmt is a subset of *sql.Stmt used to create the session.  It allows
@@ -43,7 +43,7 @@ type Stmt interface {
 }
 
 type sessionRow struct {
-	id         string
+	id         int
 	data       string
 	createdOn  time.Time
 	modifiedOn time.Time
@@ -60,12 +60,10 @@ func init() {
 	gob.Register(time.Time{})
 }
 
-func NewStore(db DB, tableName string, path string, maxAge int, keyPairs ...[]byte) (*SqliteStore, error) {
-	// Make sure table name is enclosed.
-	tableName = "`" + strings.Trim(tableName, "`") + "`"
+func NewStore(db DB, keyPairs ...[]byte) (*Store, error) {
 
-	cTableQ := "CREATE TABLE IF NOT EXISTS " +
-		tableName + " (id INTEGER PRIMARY KEY, " +
+	cTableQ := "CREATE TABLE IF NOT EXISTS sessions " +
+		"(id INTEGER PRIMARY KEY, " +
 		"session_data LONGBLOB, " +
 		"created_on TIMESTAMP DEFAULT 0, " +
 		"modified_on TIMESTAMP DEFAULT CURRENT_TIMESTAMP, " +
@@ -74,34 +72,32 @@ func NewStore(db DB, tableName string, path string, maxAge int, keyPairs ...[]by
 		return nil, err
 	}
 
-	insQ := "INSERT INTO " + tableName +
-		"(id, session_data, created_on, modified_on, expires_on) VALUES (NULL, ?, ?, ?, ?)"
+	insQ := "INSERT INTO sessions (id, session_data, created_on, modified_on, expires_on) VALUES (NULL, ?, ?, ?, ?)"
 	stmtInsert, stmtErr := db.Prepare(insQ)
 	if stmtErr != nil {
 		return nil, stmtErr
 	}
 
-	delQ := "DELETE FROM " + tableName + " WHERE id = ?"
+	delQ := "DELETE FROM sessions WHERE id = ?"
 	stmtDelete, stmtErr := db.Prepare(delQ)
 	if stmtErr != nil {
 		return nil, stmtErr
 	}
 
-	updQ := "UPDATE " + tableName + " SET session_data = ?, created_on = ?, expires_on = ? " +
+	updQ := "UPDATE sessions SET session_data = ?, created_on = ?, expires_on = ? " +
 		"WHERE id = ?"
 	stmtUpdate, stmtErr := db.Prepare(updQ)
 	if stmtErr != nil {
 		return nil, stmtErr
 	}
 
-	selQ := "SELECT id, session_data, created_on, modified_on, expires_on from " +
-		tableName + " WHERE id = ?"
+	selQ := "SELECT id, session_data, created_on, modified_on, expires_on from sessions WHERE id = ?"
 	stmtSelect, stmtErr := db.Prepare(selQ)
 	if stmtErr != nil {
 		return nil, stmtErr
 	}
 
-	return &SqliteStore{
+	return &Store{
 		db:         db,
 		stmtInsert: stmtInsert,
 		stmtDelete: stmtDelete,
@@ -109,14 +105,13 @@ func NewStore(db DB, tableName string, path string, maxAge int, keyPairs ...[]by
 		stmtSelect: stmtSelect,
 		Codecs:     securecookie.CodecsFromPairs(keyPairs...),
 		Options: &sessions.Options{
-			Path:   path,
-			MaxAge: maxAge,
+			Path:   "/",
+			MaxAge: 60 * 60 * 24 * 14,
 		},
-		table: tableName,
 	}, nil
 }
 
-func (m *SqliteStore) Close() {
+func (m *Store) Close() {
 	m.stmtSelect.Close()
 	m.stmtUpdate.Close()
 	m.stmtDelete.Close()
@@ -124,11 +119,11 @@ func (m *SqliteStore) Close() {
 	m.db.Close()
 }
 
-func (m *SqliteStore) Get(r *http.Request, name string) (*sessions.Session, error) {
+func (m *Store) Get(r *http.Request, name string) (*sessions.Session, error) {
 	return sessions.GetRegistry(r).Get(m, name)
 }
 
-func (m *SqliteStore) New(r *http.Request, name string) (*sessions.Session, error) {
+func (m *Store) New(r *http.Request, name string) (*sessions.Session, error) {
 	session := sessions.NewSession(m, name)
 	session.Options = &sessions.Options{
 		Path:   m.Options.Path,
@@ -150,7 +145,7 @@ func (m *SqliteStore) New(r *http.Request, name string) (*sessions.Session, erro
 	return session, err
 }
 
-func (m *SqliteStore) Save(r *http.Request, w http.ResponseWriter, session *sessions.Session) error {
+func (m *Store) Save(r *http.Request, w http.ResponseWriter, session *sessions.Session) error {
 	var err error
 	if session.ID == "" {
 		if err = m.insert(session); err != nil {
@@ -167,7 +162,7 @@ func (m *SqliteStore) Save(r *http.Request, w http.ResponseWriter, session *sess
 	return nil
 }
 
-func (m *SqliteStore) insert(session *sessions.Session) error {
+func (m *Store) insert(session *sessions.Session) error {
 	var createdOn time.Time
 	var modifiedOn time.Time
 	var expiresOn time.Time
@@ -204,7 +199,7 @@ func (m *SqliteStore) insert(session *sessions.Session) error {
 	return nil
 }
 
-func (m *SqliteStore) Delete(r *http.Request, w http.ResponseWriter, session *sessions.Session) error {
+func (m *Store) Delete(r *http.Request, w http.ResponseWriter, session *sessions.Session) error {
 
 	// Set cookie to expire.
 	options := *session.Options
@@ -222,7 +217,7 @@ func (m *SqliteStore) Delete(r *http.Request, w http.ResponseWriter, session *se
 	return nil
 }
 
-func (m *SqliteStore) save(session *sessions.Session) error {
+func (m *Store) save(session *sessions.Session) error {
 	if session.IsNew {
 		return m.insert(session)
 	}
@@ -259,7 +254,7 @@ func (m *SqliteStore) save(session *sessions.Session) error {
 	return nil
 }
 
-func (m *SqliteStore) load(session *sessions.Session) error {
+func (m *Store) load(session *sessions.Session) error {
 	row := m.stmtSelect.QueryRow(session.ID)
 	sess := sessionRow{}
 	scanErr := row.Scan(&sess.id, &sess.data, &sess.createdOn, &sess.modifiedOn, &sess.expiresOn)
@@ -267,7 +262,7 @@ func (m *SqliteStore) load(session *sessions.Session) error {
 		return scanErr
 	}
 	if time.Until(sess.expiresOn) < 0 {
-		return errors.New("Session expired")
+		return SessionExpired
 	}
 	err := securecookie.DecodeMulti(session.Name(), sess.data, &session.Values, m.Codecs...)
 	if err != nil {
